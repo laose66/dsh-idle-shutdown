@@ -986,9 +986,12 @@ try {
 } finally {
   gated.dispose()
   // The commit scenario now arms the real wake guard on Windows, and its helper
-// may still be writing its marker when the scenario ends; retry briefly instead
-// of failing the run on a sharing violation.
-rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
+  // may still be writing its marker when the scenario ends; retry briefly instead
+  // of failing the run on a sharing violation.
+  rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
+  // The retention scenario builds its own directory; a test that leaves files
+  // behind is exactly what this suite is supposed to catch elsewhere.
+  rmSync(persistDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
 }
 
 console.log(failures === 0 ? '\nall checks passed' : `\n${failures} check(s) failed`)
