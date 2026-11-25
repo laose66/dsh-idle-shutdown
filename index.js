@@ -28,13 +28,9 @@ import { readFileSync } from 'node:fs'
 import {
   appendFileSync,
   existsSync,
-  lstatSync,
   mkdirSync,
   readdirSync,
-  realpathSync,
   renameSync,
-  rmdirSync,
-  rmSync,
   statSync,
   unlinkSync,
   writeFileSync,
@@ -277,24 +273,6 @@ export function powerActionPlan(options = {}) {
   return { program: 'systemctl', args: ['poweroff'], osCounted: false, description: 'shutdown' }
 }
 
-/**
- * Does a profile manifest still list this bundle?
- *
- * The plugin manager removes the dependency and the `dsh.profile.bundles` entry
- * before the row is unloaded, so this answers "was this an uninstall?" at the
- * only moment the plugin can still act on it.
- *
- * @param manifest - the parsed profile package.json, possibly malformed.
- * @param name - the bundle package name.
- * @returns whether the profile still depends on, or lists, the bundle.
- */
-export function profileListsBundle(manifest, name) {
-  if (typeof name !== 'string' || name.length === 0) return false
-  if (manifest === null || typeof manifest !== 'object') return false
-  const dependency = manifest.dependencies?.[name] ?? manifest.devDependencies?.[name]
-  const bundles = Array.isArray(manifest.dsh?.profile?.bundles) ? manifest.dsh.profile.bundles : []
-  return Boolean(dependency) || bundles.includes(name)
-}
 
 /**
  * Is this persistent window alive but unable to fire?
@@ -1549,15 +1527,6 @@ export function apply(ctx, rawConfig) {
     }
   })()
 
-  /** The package name, used to tell "still installed" from "uninstalled". */
-  const pluginName = (() => {
-    try {
-      const manifest = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'package.json'), 'utf8')
-      return JSON.parse(manifest).name ?? null
-    } catch {
-      return null
-    }
-  })()
 
   /**
    * Every file this plugin creates outside its own package.
@@ -1576,61 +1545,7 @@ export function apply(ctx, rawConfig) {
     return files
   }
 
-  /**
-   * The profile directory this Host was launched for.
-   *
-   * `DSH_PROFILE_DIR` is set for shell calls, not for the Host, so it is only the
-   * first candidate: the Host runs with the profile directory as its cwd, and a
-   * `dsh.profile` block in its package.json is what tells that directory apart
-   * from any other.
-   *
-   * @returns the directory, or `undefined` when it cannot be established.
-   */
-  const profileDirectory = () => {
-    const explicit = process.env.DSH_PROFILE_DIR
-    if (explicit) return explicit
-    const home = process.env.DSH_HOME
-    const candidates = [process.cwd()]
-    if (home) candidates.push(join(home, 'profiles', basename(process.cwd())))
-    for (const candidate of candidates) {
-      try {
-        const manifest = JSON.parse(readFileSync(join(candidate, 'package.json'), 'utf8'))
-        if (manifest?.dsh?.profile) return candidate
-      } catch {
-        // Not a profile directory; try the next candidate.
-      }
-    }
-    return undefined
-  }
 
-  /**
-   * Remove the installation link pnpm leaves behind.
-   *
-   * A directory installation links the checkout into the profile. On uninstall
-   * pnpm removes the dependency but cannot delete that junction while this Host
-   * holds it open, so the link outlives the plugin. Removing the link — never its
-   * target, and only when it points at this very package — closes the loop.
-   *
-   * @param profile - the profile directory, when known.
-   */
-  const forgetInstallLink = (profile) => {
-    if (!profile || pluginName === null) return
-    const link = join(profile, 'node_modules', pluginName)
-    let stats
-    try {
-      stats = lstatSync(link)
-    } catch {
-      return // no link: an uninstall of a copied (npm/GitHub) installation
-    }
-    if (!stats.isSymbolicLink()) return
-    try {
-      if (realpathSync(link) !== realpathSync(dirname(fileURLToPath(import.meta.url)))) return
-      rmdirSync(link)
-      console.log(`[idle-shutdown] uninstall cleanup: removed the installation link ${link}`)
-    } catch {
-      // A link that cannot be removed is reported by the caller's failure path.
-    }
-  }
 
   /**
    * Move the files an older version left in the temp directory into the package
@@ -1666,82 +1581,24 @@ export function apply(ctx, rawConfig) {
     if (moved.length > 0) log(`adopted ${moved.join(', ')} from the temp directory`)
   }
 
-  /**
-   * Does the profile still list this bundle?
-   *
-   * An unload happens for a reload, a disable and an uninstall alike, and only
-   * the last one may take the files with it: the state file is what carries
-   * consumed windows, skip marks and the trigger history across restarts. The
-   * profile's own manifest is the authority — the manager removes the dependency
-   * and the bundle entry before the row is unloaded.
-   *
-   * @returns true when the profile still lists it, and also when the profile
-   *   cannot be established: files are never deleted on a guess.
-   */
-  const stillInstalled = () => {
-    const profile = profileDirectory()
-    if (!profile || pluginName === null) return true
-    try {
-      const manifest = JSON.parse(readFileSync(join(profile, 'package.json'), 'utf8'))
-      return profileListsBundle(manifest, pluginName)
-    } catch {
-      return true
-    }
-  }
 
   /**
-   * Delete everything this plugin owns, for an uninstall.
+   * Remove the files when they had to fall back to the temp directory.
    *
-   * A commit in flight owns the wake-guard files until it is done, so those are
-   * left alone in that one case; everything else goes, including the atomic-write
-   * leftovers a crash may have stranded.
-   *
-   * @param reason - recorded on the console, since the log itself is being removed.
+   * Inside the package directory they leave with the package, so an uninstall
+   * cleans them without running any code. Only a read-only package directory
+   * needs this, and nothing is lost there: the status snapshot is rebuilt from
+   * the config, and the log is a diagnostic.
    */
-  const purgeOwnedFiles = (reason) => {
-    const keepGuard = pending !== null && pending.phase === 'committing'
-    const guardFiles = new Set([KEEP_AWAKE_SCRIPT, KEEP_AWAKE_WRAPPER, KEEP_AWAKE_MARKER])
-    const removed = []
-    const failed = []
+  const removeFallbackFiles = () => {
+    if (ownedDir() !== tmpdir()) return
     for (const path of ownedPaths()) {
-      if (keepGuard && guardFiles.has(basename(path))) continue
       try {
-        if (!existsSync(path)) continue
-        unlinkSync(path)
-        removed.push(basename(path))
+        if (existsSync(path)) unlinkSync(path)
       } catch {
-        failed.push(basename(path))
+        // Held by another instance; it cleans up on its own unload.
       }
     }
-    // When the files live in the package directory (`.dsh-idle-shutdown/`), the
-    // directory itself is ours too: removing it takes the `.gitignore` with it.
-    if (basename(ownedDir()) === DATA_DIRECTORY) {
-      try {
-        rmSync(ownedDir(), { recursive: true, force: true })
-      } catch {
-        // Already gone, or held by another instance.
-      }
-    }
-    try {
-      for (const name of readdirSync(ownedDir())) {
-        if (!/^dsh-idle-shutdown.*\.tmp$/.test(name)) continue
-        try {
-          unlinkSync(join(ownedDir(), name))
-          removed.push(name)
-        } catch {
-          failed.push(name)
-        }
-      }
-    } catch {
-      // The directory is already gone; that is the goal.
-    }
-    const report =
-      `[idle-shutdown] uninstall cleanup (${reason}): ` +
-      `${removed.length} file(s) removed${failed.length > 0 ? `, ${failed.join(', ')} still held` : ''}`
-    console.log(report)
-    // The installation link, if this was a directory install: pnpm cannot remove
-    // it while this process holds it open.
-    forgetInstallLink(profileDirectory())
   }
 
   /**
@@ -1783,8 +1640,6 @@ export function apply(ctx, rawConfig) {
         // "no undo any more" is a stated boundary rather than a surprise.
         closeLeadSeconds: osGraceSeconds(),
         osOwnsCountdown: osOwnsCountdown(),
-    // Marker for the live generation: an uninstall takes the runtime files with it.
-    uninstallCleans: true,
         waitingGraceMinutes: config.waitingGraceMinutes,
         dryRun: config.dryRun,
       },
@@ -3110,19 +2965,10 @@ export function apply(ctx, rawConfig) {
       log('plugin unloaded during the countdown; nothing was committed')
     }
     writeState({ stopped: true }, true)
-    // An uninstall must leave nothing behind. A reload or a disable must keep
-    // the files: the state file is what carries consumed windows, skip marks and
-    // the trigger history into the next load.
-    if (!stillInstalled()) {
-      purgeOwnedFiles('uninstall')
-    } else {
-      // The manager can finish rewriting the profile just after the unload has
-      // run, so look once more before letting the files stand.
-      const handle = setTimeout(() => {
-        if (!stillInstalled()) purgeOwnedFiles('uninstall, after the profile settled')
-      }, 2_000)
-      handle.unref?.()
-    }
+    // Inside the package directory the runtime files leave with the package; a
+    // read-only installation that fell back to the temp directory cleans them
+    // here, so an uninstall cannot leave them behind.
+    removeFallbackFiles()
   })
 
   log(

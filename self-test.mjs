@@ -23,7 +23,6 @@ import {
   MIN_IDLE_MINUTES,
   MIN_OS_GRACE_SECONDS,
   PLATFORMS,
-  profileListsBundle,
   REACTIVATIONS,
   SUSPEND_DRIFT_MS,
   activeWindow,
@@ -163,26 +162,6 @@ check(
   PLATFORMS.map((platform) => `${platform}:${powerActionPlan({ platform }).args.join(' ')}`).join(' | '),
 )
 
-// Uninstalling must leave nothing behind, so the unload has to tell an uninstall
-// from a reload: the profile manifest is the only evidence available at that
-// moment, and these are its shapes.
-equal(
-  'cleanup: a dependency entry means installed',
-  profileListsBundle({ dependencies: { 'dsh-idle-shutdown': 'link:../dsh-idle-shutdown' } }, 'dsh-idle-shutdown'),
-  true,
-)
-equal(
-  'cleanup: a bundle entry alone means installed',
-  profileListsBundle({ dsh: { profile: { bundles: ['dsh-idle-shutdown'] } } }, 'dsh-idle-shutdown'),
-  true,
-)
-equal(
-  'cleanup: neither entry means uninstalled',
-  profileListsBundle({ dependencies: { 'other-bundle': '1.0.0' }, dsh: { profile: { bundles: ['other-bundle'] } } }, 'dsh-idle-shutdown'),
-  false,
-)
-equal('cleanup: a null manifest holds no evidence', profileListsBundle(null, 'dsh-idle-shutdown'), false)
-equal('cleanup: an empty name is never installed', profileListsBundle({ dependencies: {} }, ''), false)
 
 // ---------------------------------------------------------------------------
 // the wake guard

@@ -65,20 +65,18 @@ github:laose66/dsh-idle-shutdown
 - DSH → **插件** → 该条目 → 卸载（删除 `dsh-idle-shutdown` 这一 bundle）；
 - 或让 agent 执行 `plugin_manager` 的 `remove_bundle`。
 
-**卸载后不留东西**：插件会在卸载那一刻（检测到 profile 里已经没有这个 bundle）把自己创建的所有文件删掉——
+**卸载后不留东西**，靠的是"文件本来就在包里"，不靠插件运行时去清理：
 
-| 位置 | 内容 |
-| --- | --- |
-| profile 的 `package.json` / `pnpm-lock.yaml` / `dsh.profile.bundles` | 由插件管理器移除 |
-| `<profile>/node_modules/dsh-idle-shutdown` | 复制安装由 pnpm 删除；**目录安装留下的 junction 由插件自己删**（只删链接，绝不碰你的源码目录） |
-| **插件安装目录内的 `.dsh-idle-shutdown/`** | `dsh-idle-shutdown-state.json`、`dsh-idle-shutdown.log`（含滚动代）、`dsh-idle-shutdown-keep-awake.*`（守卫脚本/包装/marker）、崩溃残留的 `*.tmp`；卸载时整个目录一并删除 |
+| 位置 | 内容 | 卸载时 |
+| --- | --- | --- |
+| profile 的 `package.json` / `pnpm-lock.yaml` / `dsh.profile.bundles` | 安装记录 | 由插件管理器移除 |
+| `<profile>/node_modules/dsh-idle-shutdown` | 插件本体（复制安装是目录，目录安装是链接） | 复制安装由 pnpm 删除 |
+| **插件目录内的 `.dsh-idle-shutdown/`** | 状态文件、持久日志（含滚动代）、守卫脚本/包装/marker、崩溃残留 `*.tmp` | 随插件目录一起消失 |
 
-保留规则：**重载 / 禁用 / 重启 DSH 不删**——状态文件正是"已消耗时间段、跳过标记、触发次数"跨重启延续的凭据；只有**真的卸载**才清空，因此重装后是全新开始。
-
-两个无法自清理的例外（都不常见，需要手动一次）：
-
-1. **插件目录不可写**（例如把 DSH 装在 Program Files 这类只读位置）时，运行期文件退到系统临时目录；此时"先禁用后卸载"这类插件没在运行的情形，卸载瞬间没有代码可执行 → 需要手动删掉临时目录里的 `dsh-idle-shutdown*`。
-2. **在 profile 补丁里手写过同名行**：用户补丁层（`<profile>/cordis.patch.yml`）属于你自己，任何卸载都不会改动它；如果那里有一条 `- id: idle-shutdown` 手工行，卸载后要自己删掉，否则下次启动会有一条解析不到模块的行。本插件安装**不需要**手写这种行。
+- **重载 / 禁用 / 重启 DSH 不删**这些文件（它们只是诊断输出，不会影响正确性；真正的状态写在 profile 的配置里）。
+- 唯一例外：**插件目录不可写**（例如 DSH 装在 Program Files）时，文件退到系统临时目录，此时会在插件卸载出进程时被删掉。
+- 用**本地目录安装**（link 到你的源码检出）时，卸载由 pnpm 处理，它可能因为 Host 正占用而删不掉那条联接；如果之后要用 GitHub/npm 方式重装并遇到 `ERR_PNPM_EPERM rename …dsh-idle-shutdown`，按「安装排错」清掉那条联接即可。
+- 不要在 profile 补丁里手写同名行：用户补丁层任何卸载都不会改动它（本插件安装不需要这种行）。
 
 ## 使用方法
 
