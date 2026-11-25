@@ -51,7 +51,13 @@ github:laose66/dsh-idle-shutdown
 
 ### 安装排错
 
-- **`dsh: connection to github.com timed out after 5000ms`**：安装器在真正下载前会先探测 GitHub，国内网络/代理不稳时就会这样。换成本地目录安装，或等网络恢复。
+- **`dsh: connection to github.com timed out after 5000ms`**：安装器在下载前用普通 HTTPS 探测 `github.com`。有些网络里 `github.com` / `raw.githubusercontent.com` 的 HTTPS 不可达（Node、curl 都超时），但 **`codeload.github.com` 和 `api.github.com` 可达**，此时不要粘贴仓库首页，改粘 GitHub 的打包地址：
+
+  ```text
+  https://codeload.github.com/laose66/dsh-idle-shutdown/tar.gz/refs/heads/main
+  ```
+
+  `refs/heads/main` 每次安装都取最新提交，要固定版本就写 `refs/tags/v2.2.1`。这两个地址都实测安装成功。注意：`插件 → 发现` 里的市场安装等价于 `github:owner/repo`，同样受 `github.com` 可达性影响；发布到 npm 后按包名安装则不经过它。
 - **`ERR_PNPM_EPERM ... rename '...node_modules\dsh-idle-shutdown_tmp_…' -> '...node_modules\dsh-idle-shutdown'`**：这条路径上还留着**上一次"本地目录安装"的 junction（目录联接）**。Windows 不允许把目录 rename 到已有的 reparse point 上，pnpm 就会 EPERM。先卸载插件，然后把那个 junction 删掉（`cmd /c rmdir "…\node_modules\dsh-idle-shutdown"`，**不要**用递归删除，那会连你源码目录一起删），再重新安装即可。
 - 从"本地目录安装（link）"与"从 GitHub/npm 安装（复制）"之间切换时，都按上一条处理：先卸载 → 清掉残留 junction/软链接 → 再安装。装成副本后，你在源码目录里的改动**不会**自动生效，需要重新用本地目录安装。
 
