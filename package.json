@@ -1,6 +1,6 @@
 {
   "name": "dsh-idle-shutdown",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "DeepSeek Harness plugin: shut the PC down when every conversation has been idle inside the windows you set. The last seconds are handed to the OS behind a hidden one-shot wake guard; DSH itself is closed by that shutdown. / DSH 空闲关机：时间段内所有对话空闲后关机。",
   "type": "module",
   "license": "MIT",
@@ -41,9 +41,6 @@
   ],
   "scripts": {
     "test": "node self-test.mjs"
-  },
-  "peerDependencies": {
-    "@deepseek-ai/schemastery": "^3.18.1"
   },
   "dsh": {
     "bundle": {
