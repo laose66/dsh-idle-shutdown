@@ -1,0 +1,49 @@
+- insert:
+    - id: idle-shutdown
+      name: dsh-idle-shutdown
+      config:
+        # Master switch for the entry itself. false unloads the monitor and its UI.
+        enabled: true
+        # Title-bar switch: on = inside a window, idle for idleMinutes -> act.
+        armed: true
+        # Whitelist windows ("HH:MM"). The action may only fire inside one of
+        # them; an end earlier than its start crosses midnight. No window at
+        # all means all day.
+        windows:
+          - start: '23:00'
+            end: '07:00'
+        # Idle time before the power action starts. Fractions are allowed
+        # (0.5 = 30 s); the minimum is 0.05 (3 s, for testing).
+        idleMinutes: 30
+        # Countdown before the action; new conversation activity cancels it
+        # through `shutdown /a`.
+        warningSeconds: 60
+        # How often the whole conversation tree is inspected.
+        tickSeconds: 15
+        # How long a turn that waits for the user (pending approval/question)
+        # keeps blocking once its Session stops committing events.
+        waitingGraceMinutes: 10
+        # shutdown | restart | hibernate | sleep | custom
+        action: shutdown
+        # Only used by action: custom. Runs through Windows PowerShell.
+        customCommand: ''
+        # Close the DSH desktop app shortly before the power action fires.
+        closeDshFirst: true
+        # How many seconds before the action DSH is closed.
+        closeLeadSeconds: 5
+        # On Windows, closing the DSH window only hides it to the tray; the
+        # scheduled shutdown then closes it through its session-end path.
+        # true force-kills the app instead of waiting for that.
+        forceCloseAfterCommit: true
+        # true logs the decision and writes the status file without touching the OS.
+        dryRun: false
+        # Persistent files: the status file is rewritten in place, and the
+        # durable log may take at most logMaxFiles rotated generations of at
+        # most logMaxKB each; the oldest generation is dropped first.
+        logMaxKB: 256
+        logMaxFiles: 3
+        # Atomic-write leftovers (state.json.<pid>.tmp) older than this are
+        # removed on startup.
+        tempMaxAgeMinutes: 60
+        # Optional status-file path; empty uses %TEMP%\dsh-idle-shutdown-state.json.
+        stateFile: ''

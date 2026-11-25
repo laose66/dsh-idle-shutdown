@@ -1,0 +1,61 @@
+{
+  "name": "dsh-idle-shutdown",
+  "version": "1.15.0",
+  "description": "DeepSeek Harness plugin: shut the PC down only inside the windows you set, after quitting DSH normally; the last seconds (3-60s, uncancellable) are handed to the OS behind a hidden one-shot wake guard. / DSH 空闲关机：时间段内所有对话空闲后先退出 DSH 再关机。",
+  "type": "module",
+  "license": "MIT",
+  "author": "laose66",
+  "homepage": "https://github.com/laose66/dsh-idle-shutdown#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/laose66/dsh-idle-shutdown.git"
+  },
+  "bugs": {
+    "url": "https://github.com/laose66/dsh-idle-shutdown/issues"
+  },
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "dsh",
+    "idle",
+    "shutdown",
+    "power-management"
+  ],
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "settings.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "README.md",
+    "LICENSE",
+    "icon.svg",
+    "self-test.mjs",
+    "verify-clock.ps1"
+  ],
+  "scripts": {
+    "test": "node self-test.mjs"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/schemastery": "^3.18.1"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-settings"
+      ]
+    }
+  }
+}
