@@ -65,7 +65,20 @@ github:laose66/dsh-idle-shutdown
 - DSH → **插件** → 该条目 → 卸载（删除 `dsh-idle-shutdown` 这一 bundle）；
 - 或让 agent 执行 `plugin_manager` 的 `remove_bundle`。
 
-卸载只移除插件本身；**不会**动你的其他配置。插件运行期产生的文件见下方「状态文件与日志」，可手动删除。
+**卸载后不留东西**：插件会在卸载那一刻（检测到 profile 里已经没有这个 bundle）把自己创建的所有文件删掉——
+
+| 位置 | 内容 |
+| --- | --- |
+| profile 的 `package.json` / `pnpm-lock.yaml` / `dsh.profile.bundles` | 由插件管理器移除 |
+| `<profile>/node_modules/dsh-idle-shutdown` | 复制安装由 pnpm 删除；**目录安装留下的 junction 由插件自己删**（只删链接，绝不碰你的源码目录） |
+| 系统临时目录 | `dsh-idle-shutdown-state.json`、`dsh-idle-shutdown.log`（含滚动代）、`dsh-idle-shutdown-keep-awake.*`（守卫脚本/包装/marker）、崩溃残留的 `*.tmp` |
+
+保留规则：**重载 / 禁用 / 重启 DSH 不删**——状态文件正是"已消耗时间段、跳过标记、触发次数"跨重启延续的凭据；只有**真的卸载**才清空，因此重装后是全新开始。
+
+两个无法自清理的例外（都不常见，需要手动一次）：
+
+1. **先禁用、后卸载**：禁用时插件已经卸载出进程、不再运行，卸载那一刻没有代码能执行 → 系统临时目录里的文件会留下，删掉 `dsh-idle-shutdown*` 即可。
+2. **在 profile 补丁里手写过同名行**：用户补丁层（`<profile>/cordis.patch.yml`）属于你自己，任何卸载都不会改动它；如果那里有一条 `- id: idle-shutdown` 手工行，卸载后要自己删掉，否则下次启动会有一条解析不到模块的行。本插件安装**不需要**手写这种行。
 
 ## 使用方法
 
@@ -237,7 +250,7 @@ jobs/终端   ─┘        │                                        │
 
 持久日志 `%TEMP%\dsh-idle-shutdown.log` 逐行追加关键时间线（触发 / 取消 / 守卫 / 关机命令 / 冻结判定…），便于事后核对。
 
-保留策略：状态文件就地原子覆盖；日志按 `logMaxFiles` 代 × `logMaxKB` 滚动，超限先删最老的一代；崩溃残留的 `*.tmp` 超过 `tempMaxAgeMinutes` 在启动时清理；只匹配本插件自己的文件名，**绝不动同目录的其他文件**。
+卸载时这些文件会被一并删除（见「卸载」）；重载、禁用、重启 DSH 则保留。保留策略：状态文件就地原子覆盖；日志按 `logMaxFiles` 代 × `logMaxKB` 滚动，超限先删最老的一代；崩溃残留的 `*.tmp` 超过 `tempMaxAgeMinutes` 在启动时清理；只匹配本插件自己的文件名，**绝不动同目录的其他文件**。
 
 ## 性能设计
 
