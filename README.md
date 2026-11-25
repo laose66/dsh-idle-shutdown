@@ -71,13 +71,13 @@ github:laose66/dsh-idle-shutdown
 | --- | --- |
 | profile 的 `package.json` / `pnpm-lock.yaml` / `dsh.profile.bundles` | 由插件管理器移除 |
 | `<profile>/node_modules/dsh-idle-shutdown` | 复制安装由 pnpm 删除；**目录安装留下的 junction 由插件自己删**（只删链接，绝不碰你的源码目录） |
-| 系统临时目录 | `dsh-idle-shutdown-state.json`、`dsh-idle-shutdown.log`（含滚动代）、`dsh-idle-shutdown-keep-awake.*`（守卫脚本/包装/marker）、崩溃残留的 `*.tmp` |
+| **插件安装目录内的 `.dsh-idle-shutdown/`** | `dsh-idle-shutdown-state.json`、`dsh-idle-shutdown.log`（含滚动代）、`dsh-idle-shutdown-keep-awake.*`（守卫脚本/包装/marker）、崩溃残留的 `*.tmp`；卸载时整个目录一并删除 |
 
 保留规则：**重载 / 禁用 / 重启 DSH 不删**——状态文件正是"已消耗时间段、跳过标记、触发次数"跨重启延续的凭据；只有**真的卸载**才清空，因此重装后是全新开始。
 
 两个无法自清理的例外（都不常见，需要手动一次）：
 
-1. **先禁用、后卸载**：禁用时插件已经卸载出进程、不再运行，卸载那一刻没有代码能执行 → 系统临时目录里的文件会留下，删掉 `dsh-idle-shutdown*` 即可。
+1. **插件目录不可写**（例如把 DSH 装在 Program Files 这类只读位置）时，运行期文件退到系统临时目录；此时"先禁用后卸载"这类插件没在运行的情形，卸载瞬间没有代码可执行 → 需要手动删掉临时目录里的 `dsh-idle-shutdown*`。
 2. **在 profile 补丁里手写过同名行**：用户补丁层（`<profile>/cordis.patch.yml`）属于你自己，任何卸载都不会改动它；如果那里有一条 `- id: idle-shutdown` 手工行，卸载后要自己删掉，否则下次启动会有一条解析不到模块的行。本插件安装**不需要**手写这种行。
 
 ## 使用方法
@@ -197,7 +197,8 @@ dsh-idle-shutdown/
 ├── locale/zh.json      # 同上（简体中文）
 ├── icon.svg            # 插件图标
 ├── verify-clock.ps1    # 校准探针：`shutdown /t` 按墙钟还是单调钟（需管理员）
-└── self-test.mjs       # 假 Host 自测（不触碰电源状态）
+├── self-test.mjs       # 假 Host 自测（不触碰电源状态）
+└── .dsh-idle-shutdown/ # 运行期状态与日志（自带 .gitignore；卸载时整个删除）
 ```
 
 数据流：
@@ -206,7 +207,7 @@ dsh-idle-shutdown/
 Session 事件 ─┐
 Agent 状态  ─┼─▶ index.js（Host）─▶ 决策：空闲? 在窗口? ─▶ 倒计时 ─▶ 提交
 jobs/终端   ─┘        │                                        │
-                      ├─▶ 状态文件 + 持久日志（%TEMP%）          ├─▶ 唤醒守卫（外部隐藏进程）
+                      ├─▶ 状态文件 + 持久日志（包内 .dsh-idle-shutdown/） ├─▶ 唤醒守卫（外部隐藏进程）
                       └─▶ /idle-shutdown/state（长轮询）           └─▶ 系统关机命令（DSH 由该关机关闭）
                                   │
                      client.js ───┴─▶ 标题栏按钮/进度、设置页（settings.js 分块）
@@ -227,7 +228,7 @@ jobs/终端   ─┘        │                                        │
 | `dryRun` | `false` | 只记录、不执行关机（仍会武装唤醒守卫并打印将要执行的命令，适合演练） |
 | `logMaxKB` / `logMaxFiles` | `256` / `3` | 持久日志的单代大小与代数上限 |
 | `tempMaxAgeMinutes` | `60` | 原子写临时文件的清理阈值 |
-| `stateFile` | `''` | 状态文件路径；留空用系统临时目录下的 `dsh-idle-shutdown-state.json`（Windows 即 `%TEMP%`，macOS 为 `$TMPDIR`） |
+| `stateFile` | `''` | 状态文件路径；留空用**插件目录内**的 `.dsh-idle-shutdown/dsh-idle-shutdown-state.json`（目录不可写时退到系统临时目录） |
 
 `action` 仅为兼容旧配置而保留，取值只能是 `shutdown`：这个插件不做重启 / 休眠 / 睡眠 / 自定义命令（`customCommand`、`closeDshFirst`、`forceCloseAfterCommit` 已移除，旧配置里留着也无害，会被忽略）。
 
@@ -246,9 +247,9 @@ jobs/终端   ─┘        │                                        │
 
 ## 状态文件与持久日志
 
-`%TEMP%\dsh-idle-shutdown-state.json`（或 `stateFile`）记录：`version`、`armed`、`monitoring`、`windows`（完整模型）、`inWindow`、`opensInMinutes`、`idleSeconds`、`active`/`activeReasons`、`agents`、`pending`（`phase`、`window`、`remainingSeconds`、`graceSeconds`、`cancelSeconds`、`canCancel`）、`triggerCount`、`lastTrigger`、`lastCancel`、`lastSkip`、`lastConsume`、`lastExpire`、`lastReactivate`、`lastAbort`、`lastAction`、`lastSave`、`lastError`、`stats`、`files`。
+`<插件目录>/.dsh-idle-shutdown/dsh-idle-shutdown-state.json`（或 `stateFile`）记录：`version`、`armed`、`monitoring`、`windows`（完整模型）、`inWindow`、`opensInMinutes`、`idleSeconds`、`active`/`activeReasons`、`agents`、`pending`（`phase`、`window`、`remainingSeconds`、`graceSeconds`、`cancelSeconds`、`canCancel`）、`triggerCount`、`lastTrigger`、`lastCancel`、`lastSkip`、`lastConsume`、`lastExpire`、`lastReactivate`、`lastAbort`、`lastAction`、`lastSave`、`lastError`、`stats`、`files`。
 
-持久日志 `%TEMP%\dsh-idle-shutdown.log` 逐行追加关键时间线（触发 / 取消 / 守卫 / 关机命令 / 冻结判定…），便于事后核对。
+持久日志 `<插件目录>/.dsh-idle-shutdown/dsh-idle-shutdown.log` 逐行追加关键时间线（触发 / 取消 / 守卫 / 关机命令 / 冻结判定…），便于事后核对。
 
 卸载时这些文件会被一并删除（见「卸载」）；重载、禁用、重启 DSH 则保留。保留策略：状态文件就地原子覆盖；日志按 `logMaxFiles` 代 × `logMaxKB` 滚动，超限先删最老的一代；崩溃残留的 `*.tmp` 超过 `tempMaxAgeMinutes` 在启动时清理；只匹配本插件自己的文件名，**绝不动同目录的其他文件**。
 
@@ -278,7 +279,7 @@ macOS 上预期的行为与需要注意的点（未实测，所以按风险顺�
 1. **没有"系统持有截止时间"**：macOS 没有 `shutdown /t` 这类命令，所以命令是在**倒计时真正到点的那一刻**才执行，不存在"最后 3 秒不可撤销"的窗口——倒计时全程可撤销。
 2. **可能弹权限框**：`osascript … to shut down` 走 Apple Event，第一次会被「自动化/辅助功能」权限拦一下；用户在首轮需要手动允许。若被拒绝或超时，命令失败 → 插件记 `lastError` 并**保持 DSH 运行**，不会出现"以为关了其实没关"。
 3. **`shutdown` 立刻生效**：Apple Event 一旦被接受，系统随即开始关机，DSH 由该关机关闭（`caffeinate` 守卫在到点前已释放，不会拖住）。
-4. **状态/日志路径**：默认落在系统临时目录（`$TMPDIR`），与 Windows 的 `%TEMP%` 只是同一套逻辑的不同根。
+4. **状态/日志路径**：默认落在插件目录内的 `.dsh-idle-shutdown/`（macOS 与 Windows 同一逻辑），该目录自带 `.gitignore`，所以在源码检出里运行也不会弄脏 git。
 5. Windows 专属代码（`shutdown.exe`、`WM_*`、WMI、`SetThreadExecutionState`）全部由平台判断隔离，在 mac 上不会被调用。
 
 ## 限制与已知行为

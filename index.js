@@ -34,6 +34,7 @@ import {
   realpathSync,
   renameSync,
   rmdirSync,
+  rmSync,
   statSync,
   unlinkSync,
   writeFileSync,
@@ -1346,7 +1347,43 @@ export function apply(ctx, rawConfig) {
 
   // -- status file ----------------------------------------------------------
 
-  const stateFile = () => config.stateFile || join(tmpdir(), 'dsh-idle-shutdown-state.json')
+  // The status file and the durable log are diagnostics, not state: everything
+  // the engine must remember lives in the row's config. They therefore belong
+  // next to the code that writes them — removing the bundle removes them with it
+  // — and a linked (checkout) installation is kept clean by a `.gitignore` the
+  // plugin writes into that directory. Only a read-only package directory falls
+  // back to the system temp directory.
+
+  const DATA_DIRECTORY = '.dsh-idle-shutdown'
+
+  const dataDirectory = (() => {
+    let resolved = null
+    return () => {
+      if (resolved !== null) return resolved
+      const explicit = config.stateFile
+      if (explicit) {
+        resolved = dirname(explicit)
+        return resolved
+      }
+      const inside = join(dirname(fileURLToPath(import.meta.url)), DATA_DIRECTORY)
+      try {
+        mkdirSync(inside, { recursive: true })
+        const probe = join(inside, `.probe-${process.pid}`)
+        writeFileSync(probe, '')
+        unlinkSync(probe)
+        const ignore = join(inside, '.gitignore')
+        if (!existsSync(ignore)) writeFileSync(ignore, '# written by dsh-idle-shutdown\n*\n')
+        resolved = inside
+      } catch {
+        // A read-only package directory (a system-wide installation): the temp
+        // directory is the only place left.
+        resolved = tmpdir()
+      }
+      return resolved
+    }
+  })()
+
+  const stateFile = () => config.stateFile || join(dataDirectory(), 'dsh-idle-shutdown-state.json')
 
   /** Durable, append-only log beside the status file; survives a crash. */
   const logFile = () => join(dirname(stateFile()), 'dsh-idle-shutdown.log')
@@ -1596,6 +1633,40 @@ export function apply(ctx, rawConfig) {
   }
 
   /**
+   * Move the files an older version left in the temp directory into the package
+   * directory, so upgrading does not strand them.
+   *
+   * Both are diagnostics, and a newer copy always wins: the package directory is
+   * where the next write goes.
+   */
+  const adoptLegacyFiles = () => {
+    const legacy = tmpdir()
+    const target = ownedDir()
+    if (target === legacy) return
+    const names = [stateName(), logName()]
+    for (let generation = 1; generation <= config.logMaxFiles; generation += 1) {
+      names.push(`${logName()}.${generation}`)
+    }
+    names.push(KEEP_AWAKE_SCRIPT, KEEP_AWAKE_WRAPPER, KEEP_AWAKE_MARKER)
+    const moved = []
+    for (const name of names) {
+      try {
+        const from = join(legacy, name)
+        if (!existsSync(from)) continue
+        const to = join(target, name)
+        if (existsSync(to)) unlinkSync(from)
+        else {
+          renameSync(from, to)
+          moved.push(name)
+        }
+      } catch {
+        // Held by another instance: it will adopt its own files later.
+      }
+    }
+    if (moved.length > 0) log(`adopted ${moved.join(', ')} from the temp directory`)
+  }
+
+  /**
    * Does the profile still list this bundle?
    *
    * An unload happens for a reload, a disable and an uninstall alike, and only
@@ -1640,6 +1711,15 @@ export function apply(ctx, rawConfig) {
         removed.push(basename(path))
       } catch {
         failed.push(basename(path))
+      }
+    }
+    // When the files live in the package directory (`.dsh-idle-shutdown/`), the
+    // directory itself is ours too: removing it takes the `.gitignore` with it.
+    if (basename(ownedDir()) === DATA_DIRECTORY) {
+      try {
+        rmSync(ownedDir(), { recursive: true, force: true })
+      } catch {
+        // Already gone, or held by another instance.
       }
     }
     try {
@@ -3007,6 +3087,8 @@ export function apply(ctx, rawConfig) {
   // A guard left by an earlier run is dead (its process is gone); clear its
   // files before this run can arm a new one.
   forgetWakeGuard()
+  // An older version kept its files in the temp directory; take them along.
+  adoptLegacyFiles()
   // Enforce the retention policy once at startup: leftovers from a crashed run,
   // and log generations beyond the configured cap, go now.
   const prunedAtStart = pruneFiles()

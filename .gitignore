@@ -3,3 +3,6 @@ node_modules/
 *.tmp
 .DS_Store
 Thumbs.db
+
+# runtime status/log written by the plugin when it runs from this checkout
+.dsh-idle-shutdown/
