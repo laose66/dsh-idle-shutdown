@@ -1,6 +1,6 @@
 # 空闲关机 · dsh-idle-shutdown
 
-DeepSeek Harness 插件：**当所有对话都空闲下来、并且当前落在你设定的时间段内**时，先让 DSH 正常退出，再让系统执行关机（或重启 / 休眠 / 睡眠 / 自定义命令）。频繁误触发会毁掉工作，所以它把"什么算活跃""什么时候才算到点""最后几秒交给谁"都当成硬问题来处理。
+DeepSeek Harness 插件：**当所有对话都空闲下来、并且当前落在你设定的时间段内**时，让系统关机（挂机场景）。它只做这一件事——不做重启、不休眠、不睡眠、不跑自定义命令；DSH 也不由插件去退出，那部分交给系统：关机本身会关掉 DSH。频繁误触发会毁掉工作，所以它把"什么算活跃""什么时候才算到点""最后几秒交给谁"都当成硬问题来处理。
 
 - 作者：laose66 ｜ 许可：MIT ｜ 适用：DeepSeek Harness（Desktop 与 `dsh web` 均可运行）
 - 标签：`dsh-plugin`（GitHub topic，供 DSH 插件索引自动收录）
@@ -14,7 +14,7 @@ DeepSeek Harness 插件：**当所有对话都空闲下来、并且当前落在�
 | 空闲多久才动手 | 可配置（默认 30 分钟，最小 0.05 分钟仅用于测试，最大 3 小时） |
 | 倒计时可撤销 | 标题栏按钮变「撤销」，可**撤销本次**或**撤销并跳过本时间段**；倒计时期间任何对话活动都会取消它 |
 | 最后几秒不可撤销 | 只有倒计时最后 3 秒（可配 3–60 秒）交给系统关机命令，这之前一直可撤销 |
-| 先优雅退出 DSH | 用"会话结束"信号让 DSH 正常退出，退不掉才强制结束；电源动作交给系统，不怕插件先死 |
+| DSH 由系统关闭 | 插件不自己去退出 DSH：`shutdown` 会发 `WM_QUERYENDSESSION`/`WM_ENDSESSION`，Electron 收到后正常退出（实测约 1 秒），而 `/t` 隐含 `/f`，应用也拦不住它 |
 | 睡觉不会变成"醒来就关机" | 提交前检测挂起/改钟；最后一次交接前用唤醒守卫**锁住系统不休眠**（不点亮屏幕） |
 | 时间段过期还能救 | 失效的持久时间段，用它自己的「重复」下拉框重新选择即可重新激活 |
 | 干净收尾 | 状态文件 + 滚动日志，有保留上限；不轮询、空闲时零唤醒 |
@@ -127,10 +127,9 @@ Windows 会合并后台计时器，定时器迟到几秒是正常的。插件同
 1. 倒计时结束前 `closeLeadSeconds`（默认 3 秒）进入提交阶段，从此**不可撤销**：
    - 记录时间段消耗（次数减一 / 今天已用 / 临时删除）；
    - **唤醒守卫**：提前约 3 秒启动，拿到 `SetThreadExecutionState(ES_CONTINUOUS|ES_SYSTEM_REQUIRED)` 并写出 marker 后才继续；
-   - **Windows**：`shutdown /s|/r /t ceil(剩余秒数)`（上限 = `closeLeadSeconds`）——系统持有截止时间，本进程或 DSH 退出都不影响它；
-   - 让 DSH 正常退出：向主进程所有顶层窗口发 `WM_QUERYENDSESSION` + `WM_ENDSESSION`（正是系统关机时发的消息），Electron 收到后约 1 秒退出；退不掉先优雅 `taskkill`，仍不退且 `forceCloseAfterCommit` 才 `taskkill /F /T`；
-   - **macOS / Linux**：这两个系统没有"保留截止时间的关机命令"，所以等到真正到点再执行（`osascript … to shut down` / `systemctl poweroff`），由正在关机的系统收掉 DSH（`osCounted=false`）。
-   - 休眠 / 睡眠 / 自定义命令：在本进程内直接执行，执行后 DSH 保持运行。
+   - **Windows**：`shutdown /s /t ceil(剩余秒数)`（上限 = `closeLeadSeconds`）——系统持有截止时间，本进程或 DSH 退出都不影响它；
+   - **DSH 不由插件退出**：这条命令本身就是那个"正常退出"——系统在整个会话结束时发 `WM_QUERYENDSESSION` + `WM_ENDSESSION`，Electron 收到后约 1 秒退出（实测），并且 `/t > 0` 隐含 `/f`，应用无法拖住关机。插件因此不持有任何"关掉 DSH"的代码，也就不会在关掉应用之后失去执行能力。
+   - **macOS / Linux**：这两个系统没有"保留截止时间的关机命令"，所以等到真正到点再执行（`osascript … to shut down` / `systemctl poweroff`），同样由关机的系统收掉 DSH（`osCounted=false`，状态文件里能看到）。
 2. **倒计时跨过休眠/改钟就作废**：提交前检查"提交定时器迟到多久"与"墙钟比单调钟多走多少"。正常提交比截止时间**早**几秒（迟到为负）；一旦迟到 > 5 秒、或漂移 > 10 分钟，说明机器睡过/时钟被拨/进程被冻结 → **取消倒计时并重置空闲时钟**，而不是在用户刚唤醒电脑时关机。
 3. 如果命令下达后机器**没有**关掉（有人执行了 `shutdown /a`），12 秒后插件把卡在 `committing` 的倒计时清掉并记录 `lastAbort`。
 
@@ -148,11 +147,11 @@ Windows 会合并后台计时器，定时器迟到几秒是正常的。插件同
 
 `powerActionPlan()` 与 `keepAwakePlan()` 是纯函数（有单测），把"电源指令"和"防休眠指令"按平台分开：
 
-| | 关机/重启 | 防休眠 |
+| | 关机 | 防休眠 |
 | --- | --- | --- |
-| Windows | `shutdown.exe /s\|/r /t N`（系统持有截止时间） | PowerShell + `SetThreadExecutionState`（WMI 外部隐藏进程） |
-| macOS | `osascript … to shut down/restart`（到点执行） | `caffeinate -i -t N` |
-| Linux | `systemctl poweroff/reboot` | `systemd-inhibit --what=sleep` |
+| Windows | `shutdown.exe /s /t N`（系统持有截止时间） | PowerShell + `SetThreadExecutionState`（WMI 外部隐藏进程） |
+| macOS | `osascript … to shut down`（到点执行） | `caffeinate -i -t N` |
+| Linux | `systemctl poweroff` | `systemd-inhibit --what=sleep` |
 
 > Windows 是完整支持并实测过的平台；macOS / Linux 完成了适配但**未在真机验证**。
 
@@ -179,7 +178,7 @@ Session 事件 ─┐
 Agent 状态  ─┼─▶ index.js（Host）─▶ 决策：空闲? 在窗口? ─▶ 倒计时 ─▶ 提交
 jobs/终端   ─┘        │                                        │
                       ├─▶ 状态文件 + 持久日志（%TEMP%）          ├─▶ 唤醒守卫（外部隐藏进程）
-                      └─▶ /idle-shutdown/state（长轮询）           └─▶ 系统电源命令 + 会话结束请求
+                      └─▶ /idle-shutdown/state（长轮询）           └─▶ 系统关机命令（DSH 由该关机关闭）
                                   │
                      client.js ───┴─▶ 标题栏按钮/进度、设置页（settings.js 分块）
 ```
@@ -196,14 +195,12 @@ jobs/终端   ─┘        │                                        │
 | `closeLeadSeconds` | `3` | 最后几秒交给系统关机命令，也是这几秒的时长（不可撤销窗口）。范围 **3–60 秒**；设置页可改 |
 | `tickSeconds` | `15` | 安全网评估间隔下限（实际 = `max(60s, 20×tickSeconds)`） |
 | `waitingGraceMinutes` | `10` | 等待用户/审批的回合在无新日志后还能阻止关机多久 |
-| `action` | `shutdown` | `shutdown` / `restart` / `hibernate` / `sleep` / `custom` |
-| `customCommand` | `''` | `action: custom` 时执行的命令（Windows 走 PowerShell，其余走 `/bin/sh -c`） |
-| `closeDshFirst` | `true` | 是否先正常退出 DSH 再执行动作 |
-| `forceCloseAfterCommit` | `true` | 会话结束请求后仍未退出时强制结束（兜底） |
-| `dryRun` | `false` | 只记录、不退出 DSH、不执行电源动作（仍会武装唤醒守卫并打印将要执行的命令，适合演练） |
+| `dryRun` | `false` | 只记录、不执行关机（仍会武装唤醒守卫并打印将要执行的命令，适合演练） |
 | `logMaxKB` / `logMaxFiles` | `256` / `3` | 持久日志的单代大小与代数上限 |
 | `tempMaxAgeMinutes` | `60` | 原子写临时文件的清理阈值 |
-| `stateFile` | `''` | 状态文件路径；留空用 `%TEMP%\dsh-idle-shutdown-state.json` |
+| `stateFile` | `''` | 状态文件路径；留空用系统临时目录下的 `dsh-idle-shutdown-state.json`（Windows 即 `%TEMP%`，macOS 为 `$TMPDIR`） |
+
+`action` 仅为兼容旧配置而保留，取值只能是 `shutdown`：这个插件不做重启 / 休眠 / 睡眠 / 自定义命令（`customCommand`、`closeDshFirst`、`forceCloseAfterCommit` 已移除，旧配置里留着也无害，会被忽略）。
 
 示例（`cordis.patch.yml`）：
 
@@ -222,7 +219,7 @@ jobs/终端   ─┘        │                                        │
 
 `%TEMP%\dsh-idle-shutdown-state.json`（或 `stateFile`）记录：`version`、`armed`、`monitoring`、`windows`（完整模型）、`inWindow`、`opensInMinutes`、`idleSeconds`、`active`/`activeReasons`、`agents`、`pending`（`phase`、`window`、`remainingSeconds`、`graceSeconds`、`cancelSeconds`、`canCancel`）、`triggerCount`、`lastTrigger`、`lastCancel`、`lastSkip`、`lastConsume`、`lastExpire`、`lastReactivate`、`lastAbort`、`lastAction`、`lastSave`、`lastError`、`stats`、`files`。
 
-持久日志 `%TEMP%\dsh-idle-shutdown.log` 逐行追加关键时间线（触发 / 取消 / 守卫 / 电源命令 / 会话结束请求 / 冻结判定…），便于事后核对。
+持久日志 `%TEMP%\dsh-idle-shutdown.log` 逐行追加关键时间线（触发 / 取消 / 守卫 / 关机命令 / 冻结判定…），便于事后核对。
 
 保留策略：状态文件就地原子覆盖；日志按 `logMaxFiles` 代 × `logMaxKB` 滚动，超限先删最老的一代；崩溃残留的 `*.tmp` 超过 `tempMaxAgeMinutes` 在启动时清理；只匹配本插件自己的文件名，**绝不动同目录的其他文件**。
 
@@ -237,11 +234,29 @@ jobs/终端   ─┘        │                                        │
 - **长轮询按读/写分离版本号**：配置变化与运行态变化互不干扰，设置页不会因空闲抖动重建表单；页面隐藏时等待放长到 60 秒，倒计时期间缩短到 1.5 秒。
 - **客户端本地秒针**：不可撤销阶段的进度与剩余秒数由 500ms 本地计时器驱动，不等 Host 推送。
 
+## 平台支持（Windows / macOS / Linux）
+
+**插件本身是纯 Node 代码**：Host 半边只用 `node:fs` / `node:child_process` / 标准定时器，客户端半边是普通 Web 代码，所以在任何 DSH 客户端上都能加载。真正跟系统绑定的是两件事——**关机命令**和**防休眠**——它们由两张按平台分派的表决定（见上文「跨平台」）：
+
+| 平台 | 关机 | 防休眠 | 实测状态 |
+| --- | --- | --- | --- |
+| Windows | `shutdown.exe /s /t N`（系统持有截止时间） | PowerShell + `SetThreadExecutionState`，WMI 起隐藏进程 | **完整实测**：真机跑过完整关机链、守卫创建/释放、`shutdown /a` 联动 |
+| macOS | `osascript -e 'tell application "System Events" to shut down'` | `caffeinate -i -t N`（只挡空闲睡眠，屏幕该灭就灭） | **已适配、未真机验证** |
+| Linux | `systemctl poweroff` | `systemd-inhibit --what=sleep --mode=block sleep N` | **已适配、未真机验证** |
+
+macOS 上预期的行为与需要注意的点（未实测，所以按风险顺序列出）：
+
+1. **没有"系统持有截止时间"**：macOS 没有 `shutdown /t` 这类命令，所以命令是在**倒计时真正到点的那一刻**才执行，不存在"最后 3 秒不可撤销"的窗口——倒计时全程可撤销。
+2. **可能弹权限框**：`osascript … to shut down` 走 Apple Event，第一次会被「自动化/辅助功能」权限拦一下；用户在首轮需要手动允许。若被拒绝或超时，命令失败 → 插件记 `lastError` 并**保持 DSH 运行**，不会出现"以为关了其实没关"。
+3. **`shutdown` 立刻生效**：Apple Event 一旦被接受，系统随即开始关机，DSH 由该关机关闭（`caffeinate` 守卫在到点前已释放，不会拖住）。
+4. **状态/日志路径**：默认落在系统临时目录（`$TMPDIR`），与 Windows 的 `%TEMP%` 只是同一套逻辑的不同根。
+5. Windows 专属代码（`shutdown.exe`、`WM_*`、WMI、`SetThreadExecutionState`）全部由平台判断隔离，在 mac 上不会被调用。
+
 ## 限制与已知行为
 
-- **Windows 完整支持**；macOS / Linux 已适配但未在真机验证。
-- 关闭 DSH 时发送正常关闭请求，失败才强制结束；`dsh web` 没有桌面进程时不会误杀终端。
-- 提交阶段（最后 `closeLeadSeconds` 秒）不可撤销；用户自己 `shutdown /a` 不算"被撤销"（插件会据此收尾）。
+- **Windows 完整支持并实测**；macOS / Linux 已适配但**未在真机验证**（见上一节的风险点）。
+- **DSH 不由插件退出**：关机命令本身就是那个"正常退出"（`WM_QUERYENDSESSION` → `WM_ENDSESSION`，`/t>0` 隐含 `/f`），插件里没有任何关闭应用的代码，因此插件先死也不影响动作，`dsh web` 也不会被误杀终端。
+- 提交阶段（最后 `closeLeadSeconds` 秒）不可撤销；用户自己 `shutdown /a` 不算"被撤销"（插件会据此收尾：守卫立即释放、倒计时 12 秒后清掉并记 `lastAbort`）。
 - 防休眠只是"不进入睡眠"，不是"锁屏/保持点亮"。
 - 只感知 DSH 内部的对话活动，不识别系统级键鼠活动；想临时不关机就点标题栏开关或撤销。
 - 插件被卸载时只取消尚未提交的倒计时。

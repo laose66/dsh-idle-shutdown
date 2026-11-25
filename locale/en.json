@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Idle shutdown",
-    "description": "Shuts the PC down only inside the windows you set, after quitting DSH normally; the last seconds are handed to the system behind a hidden one-shot wake guard."
+    "description": "Shuts the PC down when every conversation has been idle inside the windows you set; the last seconds are handed to the OS behind a hidden one-shot wake guard, and DSH is closed by that shutdown."
   }
 }

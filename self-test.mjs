@@ -36,7 +36,6 @@ import {
   powerActionPlan,
   reactivateWindow,
   windowStale,
-  sessionEndScript,
   suspendDetected,
   computeExpiresAt,
   consumeWindow,
@@ -77,9 +76,6 @@ equal('defaults: waitingGraceMinutes', defaults.waitingGraceMinutes, 10)
 equal('defaults: armed', defaults.armed, true)
 equal('defaults: windows', defaults.windows, DEFAULT_WINDOWS)
 equal('defaults: dryRun', defaults.dryRun, false)
-equal('defaults: closeDshFirst', defaults.closeDshFirst, true)
-equal('defaults: DSH is force-closed only as a fallback', defaults.forceCloseAfterCommit, true)
-equal('clamp: forceCloseAfterCommit accepts false', resolveConfig({ forceCloseAfterCommit: false }).forceCloseAfterCommit, false)
 // The last seconds of the countdown belong to the OS command: three of them are
 // enough for DSH to leave and too few to be a second, uncontrollable countdown.
 equal('defaults: the OS grace is three seconds', defaults.closeLeadSeconds, DEFAULT_OS_GRACE_SECONDS)
@@ -95,15 +91,9 @@ equal('limits: the countdown cap is half an hour', MAX_WARNING_SECONDS, 1800)
 equal('limits: the grace floor is three seconds', MIN_OS_GRACE_SECONDS, 3)
 equal('limits: the grace cap is one minute', MAX_OS_GRACE_SECONDS, 60)
 
-// The session-end request is the only way to quit DSH from outside: closing
-// its window hides it to the tray instead.
-const script = sessionEndScript(4242)
-check('session-end: the script sends the shutdown message', script.includes('WM_ENDSESSION, (IntPtr)1'), script.slice(0, 80))
-check('session-end: the session is queried first', script.includes('WM_QUERYENDSESSION'), '')
-check('session-end: every window of the process is messaged', script.includes('EnumWindows') && script.includes('GetWindowThreadProcessId'), '')
-check('session-end: a busy window cannot hang the caller', script.includes('SMTO_ABORTIFHUNG'), '')
-check('session-end: the pid is passed through', script.includes('[DshSessionEnd]::Send(4242)'), script.slice(-60))
-check('session-end: the C# source is a here-string', script.startsWith("$source = @'") && script.includes("\n'@\n"), '')
+// DSH is closed by the shutdown itself (WM_QUERYENDSESSION → WM_ENDSESSION), so
+// the plugin owns no "close the app" code at all.
+check('lifecycle: the plugin never closes DSH itself', typeof (await import('./index.js')).sessionEndScript === 'undefined', '')
 
 // The wake detection compares two clocks: only a wall-clock advance the
 // monotonic clock did not see proves a suspend. Ordinary timer lateness
@@ -132,7 +122,10 @@ check('commit: the drift threshold is far above the idle one', COMMIT_DRIFT_MS >
 // ---------------------------------------------------------------------------
 
 equal('platforms: three are supported', PLATFORMS, ['win32', 'darwin', 'linux'])
-const winShutdown = powerActionPlan('shutdown', { platform: 'win32', graceSeconds: 3 })
+// This plugin performs exactly one action. Sleep, hibernate, restart and custom
+// commands are deliberately not offered: it is an idle *shutdown*.
+equal('actions: only shutdown', ACTIONS, ['shutdown'])
+const winShutdown = powerActionPlan({ platform: 'win32', graceSeconds: 3 })
 equal('plan/win32: shutdown hands the last three seconds to the OS', winShutdown.args, [
   '/s',
   '/t',
@@ -141,51 +134,32 @@ equal('plan/win32: shutdown hands the last three seconds to the OS', winShutdown
   'DSH idle shutdown',
 ])
 equal('plan/win32: the OS owns the countdown', winShutdown.osCounted, true)
-equal('plan/win32: restart uses /r', powerActionPlan('restart', { platform: 'win32', graceSeconds: 4 }).args, [
-  '/r',
-  '/t',
-  '4',
-  '/c',
-  'DSH idle shutdown',
-])
 equal(
   'plan/win32: the default grace comes from one constant',
-  powerActionPlan('shutdown', { platform: 'win32' }).args[2],
+  powerActionPlan({ platform: 'win32' }).args[2],
   String(DEFAULT_OS_GRACE_SECONDS),
 )
 equal(
   'plan/win32: a zero grace is clamped up',
-  powerActionPlan('shutdown', { platform: 'win32', graceSeconds: 0 }).args[2],
+  powerActionPlan({ platform: 'win32', graceSeconds: 0 }).args[2],
   String(MIN_OS_GRACE_SECONDS),
 )
 equal(
   'plan/win32: a huge grace is clamped down',
-  powerActionPlan('shutdown', { platform: 'win32', graceSeconds: 9999 }).args[2],
+  powerActionPlan({ platform: 'win32', graceSeconds: 9999 }).args[2],
   String(MAX_OS_GRACE_SECONDS),
 )
-equal('plan/win32: sleep is issued directly', powerActionPlan('sleep', { platform: 'win32' }).osCounted, false)
-equal('plan/win32: hibernate is issued directly', powerActionPlan('hibernate', { platform: 'win32' }).program, 'shutdown.exe')
-equal(
-  'plan/win32: a custom action is a PowerShell command',
-  powerActionPlan('custom', { platform: 'win32', customCommand: 'Stop-Computer -Force' }).args.at(-1),
-  'Stop-Computer -Force',
-)
-equal('plan/darwin: shutdown is an Apple event', powerActionPlan('shutdown', { platform: 'darwin' }).program, 'osascript')
-equal(
-  'plan/darwin: the system owns no countdown',
-  powerActionPlan('shutdown', { platform: 'darwin' }).osCounted,
-  false,
-)
-equal('plan/darwin: sleep is pmset sleepnow', powerActionPlan('sleep', { platform: 'darwin' }).args, ['sleepnow'])
-equal('plan/linux: shutdown is systemctl poweroff', powerActionPlan('shutdown', { platform: 'linux' }).args, ['poweroff'])
-equal('plan/linux: restart is systemctl reboot', powerActionPlan('restart', { platform: 'linux' }).args, ['reboot'])
-equal('plan/linux: hibernate is systemctl hibernate', powerActionPlan('hibernate', { platform: 'linux' }).args, ['hibernate'])
+equal('plan/darwin: shutdown is an Apple event', powerActionPlan({ platform: 'darwin' }).program, 'osascript')
+equal('plan/darwin: the system owns no countdown', powerActionPlan({ platform: 'darwin' }).osCounted, false)
+equal('plan/linux: shutdown is systemctl poweroff', powerActionPlan({ platform: 'linux' }).args, ['poweroff'])
 check(
-  'plan/custom: the command line reaches every platform',
-  PLATFORMS.every((platform) =>
-    powerActionPlan('custom', { platform, customCommand: 'echo hi' }).args.join(' ').includes('echo hi'),
-  ),
-  '',
+  'plan: every platform asks for a shutdown and nothing else',
+  PLATFORMS.every((platform) => {
+    const plan = powerActionPlan({ platform })
+    const line = plan.args.join(' ')
+    return plan.description === 'shutdown' && /\/s |shut down|poweroff/.test(line)
+  }),
+  PLATFORMS.map((platform) => `${platform}:${powerActionPlan({ platform }).args.join(' ')}`).join(' | '),
 )
 
 // ---------------------------------------------------------------------------
@@ -289,15 +263,12 @@ equal(
   'today',
 )
 
-const clamped = resolveConfig({ idleMinutes: 0, tickSeconds: 1, action: 'nope', customCommand: '   ' })
+const clamped = resolveConfig({ idleMinutes: 0, tickSeconds: 1, action: 'nope' })
 check('clamp: idleMinutes floor', clamped.idleMinutes === MIN_IDLE_MINUTES, String(clamped.idleMinutes))
 check('clamp: tickSeconds floor', clamped.tickSeconds === 2, String(clamped.tickSeconds))
-equal('clamp: unknown action', clamped.action, 'shutdown')
+equal('clamp: any action becomes the only one', clamped.action, 'shutdown')
 
-const custom = resolveConfig({ action: 'custom', customCommand: '  Stop-Computer -Force ' })
-equal('custom: action', custom.action, 'custom')
-equal('custom: command trimmed', custom.customCommand, 'Stop-Computer -Force')
-equal('custom: every action is accepted', ACTIONS.includes('hibernate'), true)
+equal('actions: hibernation is not offered', ACTIONS.includes('hibernate'), false)
 
 // ---------------------------------------------------------------------------
 // times and windows
@@ -639,7 +610,6 @@ const hostConfig = {
   tickSeconds: 2,
   waitingGraceMinutes: 10,
   closeLeadSeconds: 1,
-  closeDshFirst: true,
   dryRun: true,
   stateFile: firstState,
 }

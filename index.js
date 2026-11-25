@@ -33,8 +33,8 @@ import { fileURLToPath } from 'node:url'
 /** Diagnostic name of this Host plugin. */
 export const name = 'idle-shutdown'
 
-/** Power actions this plugin can perform. */
-export const ACTIONS = ['shutdown', 'restart', 'hibernate', 'sleep', 'custom']
+/** The one action this plugin performs: it is an idle *shutdown*, nothing else. */
+export const ACTIONS = ['shutdown']
 
 /** Smallest accepted `idleMinutes` (3 seconds) — exists for testing. */
 export const MIN_IDLE_MINUTES = 0.05
@@ -225,72 +225,43 @@ export function keepAwakeLauncher(wrapper, directory) {
 }
 
 /**
- * The command that starts one power action on this platform.
+ * The command that performs the idle shutdown on this platform.
  *
- * Only Windows owns a countdown: `shutdown /s|/r /t <grace>` keeps the deadline
+ * Only Windows owns a countdown: `shutdown /s /t <grace>` keeps the deadline
  * after this process is gone, which is why the last seconds are handed to it.
- * macOS and Linux have no equivalent, so the action is issued at the deadline
- * itself and DSH is closed by the OS that is going away anyway.
+ * macOS and Linux have no equivalent, so the command is issued at the deadline
+ * itself. In every case the system that is going away closes DSH.
  *
- * @param action - one of ACTIONS.
- * @param options - platform, the OS grace in seconds and the custom command.
+ * @param options - platform and the OS grace in seconds.
  * @returns the program, its arguments and whether the OS owns the countdown.
  */
-export function powerActionPlan(action, options = {}) {
+export function powerActionPlan(options = {}) {
   const platform = PLATFORMS.includes(options.platform) ? options.platform : 'win32'
   const requested = Number(options.graceSeconds)
   const grace = Math.max(
     MIN_OS_GRACE_SECONDS,
     Math.min(MAX_OS_GRACE_SECONDS, Math.floor(Number.isFinite(requested) ? requested : DEFAULT_OS_GRACE_SECONDS)),
   )
-  const custom = String(options.customCommand ?? '').trim()
 
   if (platform === 'win32') {
-    if (action === 'hibernate') return { program: 'shutdown.exe', args: ['/h'], osCounted: false, description: 'hibernate' }
-    if (action === 'sleep') {
-      return { program: 'rundll32.exe', args: ['powrprof.dll,SetSuspendState', '0,1,0'], osCounted: false, description: 'sleep' }
-    }
-    if (action === 'custom') {
-      return {
-        program: 'powershell.exe',
-        args: ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', custom],
-        osCounted: false,
-        description: 'custom command',
-      }
-    }
-    const flag = action === 'restart' ? '/r' : '/s'
     return {
       program: 'shutdown.exe',
-      args: [flag, '/t', String(grace), '/c', 'DSH idle shutdown'],
+      args: ['/s', '/t', String(grace), '/c', 'DSH idle shutdown'],
       osCounted: true,
-      description: action === 'restart' ? 'restart' : 'shutdown',
+      description: 'shutdown',
     }
   }
-
   if (platform === 'darwin') {
-    if (action === 'shutdown' || action === 'restart') {
-      const verb = action === 'restart' ? 'restart' : 'shut down'
-      return {
-        program: 'osascript',
-        args: ['-e', `tell application "System Events" to ${verb}`],
-        osCounted: false,
-        description: action,
-      }
+    return {
+      program: 'osascript',
+      args: ['-e', 'tell application "System Events" to shut down'],
+      osCounted: false,
+      description: 'shutdown',
     }
-    if (action === 'custom') {
-      return { program: '/bin/sh', args: ['-c', custom], osCounted: false, description: 'custom command' }
-    }
-    return { program: 'pmset', args: ['sleepnow'], osCounted: false, description: 'sleep' }
   }
-
   // Linux: systemd is the only interface that is both available and unprivileged
   // for a logged-in user (polkit asks when the seat allows it).
-  const verb =
-    action === 'restart' ? 'reboot' : action === 'sleep' ? 'suspend' : action === 'hibernate' ? 'hibernate' : 'poweroff'
-  if (action === 'custom') {
-    return { program: '/bin/sh', args: ['-c', custom], osCounted: false, description: 'custom command' }
-  }
-  return { program: 'systemctl', args: [verb], osCounted: false, description: action }
+  return { program: 'systemctl', args: ['poweroff'], osCounted: false, description: 'shutdown' }
 }
 
 /**
@@ -652,48 +623,6 @@ export function suspendDetected(facts) {
 }
 
 /**
- * The PowerShell script that asks Windows to end a process's session.
- *
- * It sends the two messages a real shutdown sends, to every top-level window of
- * the process (`EnumWindows` + `SendMessageTimeout`, so a window that is busy
- * cannot hang the caller). Kept as a pure function so the generated script can
- * be checked without launching PowerShell.
- *
- * @param pid - the desktop main process.
- * @returns the script to hand to `powershell.exe -Command`.
- */
-export function sessionEndScript(pid) {
-  const source = [
-    'using System;',
-    'using System.Runtime.InteropServices;',
-    'public static class DshSessionEnd {',
-    '  const uint WM_QUERYENDSESSION = 0x0011;',
-    '  const uint WM_ENDSESSION = 0x0016;',
-    '  const uint SMTO_ABORTIFHUNG = 0x0002;',
-    '  delegate bool EnumProc(IntPtr hWnd, IntPtr lParam);',
-    '  [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc callback, IntPtr extra);',
-    '  [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint owner);',
-    '  [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint message, IntPtr wParam, IntPtr lParam, uint flags, uint timeout, out IntPtr result);',
-    '  public static int Send(int processId) {',
-    '    int count = 0;',
-    '    EnumWindows((hWnd, extra) => {',
-    '      uint owner;',
-    '      GetWindowThreadProcessId(hWnd, out owner);',
-    '      if (owner != (uint)processId) return true;',
-    '      IntPtr result;',
-    '      SendMessageTimeout(hWnd, WM_QUERYENDSESSION, IntPtr.Zero, IntPtr.Zero, SMTO_ABORTIFHUNG, 2000, out result);',
-    '      SendMessageTimeout(hWnd, WM_ENDSESSION, (IntPtr)1, IntPtr.Zero, SMTO_ABORTIFHUNG, 2000, out result);',
-    '      count += 1;',
-    '      return true;',
-    '    }, IntPtr.Zero);',
-    '    return count;',
-    '  }',
-    '}',
-  ].join('\n')
-  return ["$source = @'", source, "'@", 'Add-Type -TypeDefinition $source', `[Console]::Out.Write([DshSessionEnd]::Send(${Math.trunc(Number(pid))}))`].join('\n')
-}
-
-/**
  * Decide whether one open turn still counts as an active conversation.
  *
  * @param facts - the turn boundary, the Agent's last activity, and status.
@@ -742,9 +671,6 @@ export function resolveConfig(raw) {
   const boolean = (value, fallback) => (typeof value === 'boolean' ? value : fallback)
   const string = (value, fallback) => (typeof value === 'string' ? value : fallback)
 
-  const action = ACTIONS.includes(source.action) ? source.action : 'shutdown'
-  const customCommand = string(source.customCommand, '').trim()
-
   return {
     enabled: boolean(source.enabled, true),
     armed: boolean(source.armed, true),
@@ -756,17 +682,14 @@ export function resolveConfig(raw) {
     warningSeconds: Math.min(MAX_WARNING_SECONDS, Math.max(0, Math.floor(number(source.warningSeconds, 60)))),
     tickSeconds: Math.max(2, Math.floor(number(source.tickSeconds, 15))),
     waitingGraceMinutes: Math.max(0, number(source.waitingGraceMinutes, 10)),
-    // A custom action without a command would silently do nothing; fall back
-    // to the plain shutdown the row already declares as its purpose.
-    action: action === 'custom' && customCommand.length === 0 ? 'shutdown' : action,
-    customCommand,
-    closeDshFirst: boolean(source.closeDshFirst, true),
+    // DSH is closed by the shutdown itself, so there is no close-first knob and\r
+    // no second action to choose.\r
+    action: 'shutdown',
     // The last seconds of the countdown, owned by the power command itself.
     closeLeadSeconds: Math.max(
       MIN_OS_GRACE_SECONDS,
       Math.min(MAX_OS_GRACE_SECONDS, Math.floor(number(source.closeLeadSeconds, DEFAULT_OS_GRACE_SECONDS))),
     ),
-    forceCloseAfterCommit: boolean(source.forceCloseAfterCommit, true),
     logMaxKB: Math.max(0, Math.floor(number(source.logMaxKB, 256))),
     logMaxFiles: Math.max(0, Math.min(10, Math.floor(number(source.logMaxFiles, 3)))),
     tempMaxAgeMinutes: Math.max(5, Math.floor(number(source.tempMaxAgeMinutes, 60))),
@@ -818,10 +741,7 @@ export const Config = Schema?.object({
   tickSeconds: Schema.number().step(1).min(2).default(15),
   waitingGraceMinutes: Schema.number().min(0).default(10),
   action: Schema.union(ACTIONS).default('shutdown'),
-  customCommand: Schema.string().default(''),
-  closeDshFirst: Schema.boolean().default(true),
   closeLeadSeconds: Schema.number().step(1).min(MIN_OS_GRACE_SECONDS).max(MAX_OS_GRACE_SECONDS).default(DEFAULT_OS_GRACE_SECONDS),
-  forceCloseAfterCommit: Schema.boolean().default(true),
   logMaxKB: Schema.number().step(1).min(0).default(256),
   logMaxFiles: Schema.number().step(1).min(0).max(10).default(3),
   tempMaxAgeMinutes: Schema.number().step(1).min(5).default(60),
@@ -897,7 +817,6 @@ export function apply(ctx, rawConfig) {
 
   let disposed = false
   let pending = null
-  let closedDsh = false
 
   const state = {
     startedAt: Date.now(),
@@ -1601,8 +1520,6 @@ export function apply(ctx, rawConfig) {
         closeLeadSeconds: osGraceSeconds(),
         osOwnsCountdown: osOwnsCountdown(),
         waitingGraceMinutes: config.waitingGraceMinutes,
-        closeDshFirst: config.closeDshFirst,
-        forceCloseAfterCommit: config.forceCloseAfterCommit,
         dryRun: config.dryRun,
       },
       armed,
@@ -1750,46 +1667,6 @@ export function apply(ctx, rawConfig) {
       })
     })
 
-  /** Is the process still running? */
-  const processAlive = (pid) => {
-    if (!Number.isInteger(pid) || pid <= 0) return false
-    try {
-      process.kill(pid, 0)
-      return true
-    } catch {
-      return false
-    }
-  }
-
-  /** Wait until the process leaves, or the timeout expires. */
-  const waitForExit = async (pid, timeoutMs) => {
-    const deadline = Date.now() + timeoutMs
-    while (Date.now() < deadline) {
-      if (!processAlive(pid)) return true
-      await new Promise((resolve) => setTimeout(resolve, 250))
-    }
-    return !processAlive(pid)
-  }
-
-  /**
-   * Ask Windows to end the app's session, the same message a real shutdown
-   * sends.
-   *
-   * A window close cannot quit the app on Windows: the shell turns WM_CLOSE
-   * into a hide to the tray. Session end is the signal Electron acts on (it
-   * tears the process down), so it is the only way to close DSH from outside.
-   *
-   * @param pid - the desktop main process.
-   * @returns how many windows were messaged (0 when the request failed).
-   */
-  const requestSessionEnd = async (pid) => {
-    const script = sessionEndScript(pid)
-    const result = await runAwaited('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script])
-    if (!result.ok) return 0
-    const count = Number.parseInt(result.stdout.trim(), 10)
-    return Number.isInteger(count) && count > 0 ? count : 0
-  }
-
   /** The last seconds of the countdown: live, clamped, never below one. */
   const osGraceSeconds = () => {
     const requested = Number(live('closeLeadSeconds', config.closeLeadSeconds))
@@ -1800,8 +1677,7 @@ export function apply(ctx, rawConfig) {
   }
 
   /** Does the power command keep its own deadline after DSH is closed? */
-  const osOwnsCountdown = () =>
-    process.platform === 'win32' && (config.action === 'shutdown' || config.action === 'restart')
+  const osOwnsCountdown = () => process.platform === 'win32'
 
   /**
    * Write the Windows wake guard beside the status file.
@@ -1911,45 +1787,12 @@ export function apply(ctx, rawConfig) {
    * @returns whether the platform accepted the command.
    */
   const runPowerAction = async (graceSeconds) => {
-    const plan = powerActionPlan(config.action, {
-      platform: process.platform,
-      graceSeconds,
-      customCommand: config.customCommand,
-    })
+    const plan = powerActionPlan({ platform: process.platform, graceSeconds })
     logLine(`power command: ${plan.program} ${plan.args.join(' ')}`)
     const result = await runAwaited(plan.program, plan.args)
     logLine(`power command ok=${result.ok} (${plan.description})`)
     if (!result.ok) warn(`${plan.description} was refused by the system`)
     return { ok: result.ok, plan }
-  }
-
-  /**
-   * Identify the Electron main process this Host belongs to, if any.
-   *
-   * The Host runs inside a Desktop utility process whose direct parent is the
-   * app's main process. A headless `dsh web` run has a shell as its parent, and
-   * killing that would be wrong, so the parent is only accepted when it is the
-   * same executable without an Electron `--type=` role.
-   */
-  let cachedMainPid = undefined
-  const desktopMainPid = async () => {
-    // The parent of this Host process is the app's main process; it cannot
-    // change during the session, so the probe only runs once.
-    if (Number.isInteger(cachedMainPid) && processAlive(cachedMainPid)) return cachedMainPid
-    cachedMainPid = undefined
-    const parent = process.ppid
-    if (!Number.isInteger(parent) || parent <= 0) return undefined
-    const script =
-      `$p = Get-CimInstance Win32_Process -Filter "ProcessId=${parent}" -ErrorAction SilentlyContinue;` +
-      'if ($p) { [Console]::Out.Write($p.Name); [Console]::Out.Write([char]10); [Console]::Out.Write($p.CommandLine) }'
-    const result = await runAwaited('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script])
-    if (!result.ok) return undefined
-    const [parentName = '', ...rest] = result.stdout.split(/\r?\n/)
-    const commandLine = rest.join(' ')
-    if (parentName.trim().toLowerCase() !== basename(process.execPath).toLowerCase()) return undefined
-    if (/--type=/.test(commandLine)) return undefined
-    cachedMainPid = parent
-    return parent
   }
 
   /** Find the same window in the live list, by identity of its defining fields. */
@@ -2095,26 +1938,18 @@ export function apply(ctx, rawConfig) {
 
     const graceSeconds = osGraceSeconds()
     const osCounted = osOwnsCountdown()
-    const plan = powerActionPlan(config.action, {
-      platform: process.platform,
-      graceSeconds,
-      customCommand: config.customCommand,
-    })
+    const plan = powerActionPlan({ platform: process.platform, graceSeconds })
     if (config.dryRun) {
       // A dry run builds the command and waits for the wake guard without running
       // it: that is the only safe way to prove the hand-over without switching
       // the PC off.
-      log(`DRY RUN: would run the ${config.action} action now`)
+      log(`DRY RUN: would run the ${config.action} now`)
       logLine(`dry run: ${plan.program} ${plan.args.join(' ')} (not executed)`)
       pending = null
       writeState({ dryRunTriggered: true }, true)
       return
     }
-    const pid = osCounted && config.closeDshFirst ? await desktopMainPid() : undefined
-    logLine(
-      `commit: action=${config.action} platform=${process.platform} grace=${graceSeconds}s` +
-        ` closeDshFirst=${config.closeDshFirst} pid=${pid ?? 'none'}`,
-    )
+    logLine(`commit: action=${config.action} platform=${process.platform} grace=${graceSeconds}s`)
 
     if (!osCounted) {
       // No OS-owned deadline here: wait for the end of the countdown and then
@@ -2171,49 +2006,13 @@ export function apply(ctx, rawConfig) {
       Math.max(6_000, committing.dueAt - Date.now() + 12_000),
     )
 
-    if (config.closeDshFirst === false) {
-      log('closeDshFirst is off; DSH keeps running until the action')
-      logLine('closeDshFirst=false: DSH left running')
-      return
-    }
-    if (!Number.isInteger(pid)) {
-      log('no DSH desktop main process found; the action runs on its own')
-      logLine('no DSH desktop main process; nothing to close')
-      return
-    }
-
-    log(`asking DSH to quit (pid ${pid})`)
-    // Log before the request: the app takes this process down with it when it
-    // quits, so nothing written afterwards can be relied on.
-    logLine(`session-end request to pid ${pid}; DSH should exit within ${graceSeconds}s`)
-    const messaged = await requestSessionEnd(pid)
-    if (await waitForExit(pid, Math.max(1, graceSeconds - 1) * 1000)) {
-      log('DSH exited')
-      return
-    }
-    logLine(`session-end request sent to ${messaged} window(s); DSH did not exit`)
-    // The request did not quit it. Try the graceful close, then decide whether
-    // to force the process; the OS deadline may already be reached.
-    logLine(`taskkill /PID ${pid}`)
-    const graceful = await runAwaited('taskkill.exe', ['/PID', String(pid)])
-    logLine(`taskkill ok=${graceful.ok}`)
-    if (config.forceCloseAfterCommit && (await waitForExit(pid, 700))) {
-      log('DSH exited after the graceful close')
-      logLine('DSH exited after the graceful close')
-      return
-    }
-    if (config.forceCloseAfterCommit) {
-      warn('DSH did not quit after the session-end request; forcing it')
-      logLine(`force taskkill /F /PID ${pid}`)
-      await runAwaited('taskkill.exe', ['/F', '/PID', String(pid), '/T'])
-      if (await waitForExit(pid, 700)) {
-        log('DSH exited after the forced close')
-        logLine('DSH exited after the forced close')
-      }
-      return
-    }
-    log('DSH is still running; the scheduled shutdown will close it')
-    logLine('DSH still running; the scheduled shutdown closes the app')
+    // DSH is not closed from here. The shutdown the OS is now running is what
+    // closes DSH — it sends WM_QUERYENDSESSION/WM_ENDSESSION, the message
+    // Electron exits on — and `/t` implies `/f`, so the app cannot hold it up.
+    // Keeping the plugin out of that path is the whole point: the action belongs
+    // to the system, not to the process that may die with the app.
+    logLine(`shutdown handed to the system; the OS closes DSH within ${remaining}s`)
+    log('shutdown handed to the system; DSH is closed by it')
   }
 
   const arm = (reason) => {
@@ -2303,7 +2102,6 @@ export function apply(ctx, rawConfig) {
     clearTimer(cancelled.commitTimer)
     clearTimer(cancelled.awakeTimer)
     clearTimer(cancelled.settleTimer)
-    closedDsh = false
     // Reset the idle clock so the same countdown cannot restart immediately.
     state.lastActivityAt = Date.now()
     state.lastCancel = { at: iso(Date.now()), reason, action: cancelled.action, window: cancelled.window }
@@ -3000,16 +2798,6 @@ export function apply(ctx, rawConfig) {
     log('monitoring started')
     tick({ reconcile: true })
     reschedule()
-    // Warm the app-main pid probe off the commit path (it costs one PowerShell
-    // start, and at commit time that delay would be on the critical path).
-    if (config.closeDshFirst !== false && (config.action === 'shutdown' || config.action === 'restart')) {
-      const savedError = state.lastError
-      desktopMainPid()
-        .catch(() => {})
-        .then(() => {
-          state.lastError = savedError
-        })
-    }
   }
 
   const stopMonitoring = (reason) => {
